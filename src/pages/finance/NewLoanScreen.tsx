@@ -22,6 +22,7 @@ import {
   Car,
   AlertTriangle,
   Bookmark,
+  Download,
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext';
 import { PageHeader } from '../../components/common/PageHeader';
@@ -387,10 +388,10 @@ export const NewLoanScreen: React.FC<NewLoanScreenProps> = ({ onCancel, onSucces
             <button
               type="button"
               onClick={() => setIsPrintModalOpen(true)}
-              className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs"
+              className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shadow-xs"
             >
-              <Printer className="w-4 h-4 text-emerald-400" />
-              <span>Print Application (A4 PDF)</span>
+              <Download className="w-4 h-4 text-emerald-200" />
+              <span>Generate / Download Loan Application</span>
             </button>
             <button
               type="button"
@@ -904,10 +905,10 @@ export const NewLoanScreen: React.FC<NewLoanScreenProps> = ({ onCancel, onSucces
             <button
               type="button"
               onClick={() => setIsPrintModalOpen(true)}
-              className="px-4 py-2.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl shadow-2xs transition-colors flex items-center space-x-1.5"
+              className="px-4 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl shadow-2xs transition-colors flex items-center space-x-1.5"
             >
-              <Printer className="w-4 h-4 text-emerald-400" />
-              <span>Print Application</span>
+              <Download className="w-4 h-4 text-emerald-200" />
+              <span>Generate / Download Loan Application</span>
             </button>
             <button
               type="button"

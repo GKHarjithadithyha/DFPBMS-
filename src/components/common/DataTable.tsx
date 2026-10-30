@@ -1,5 +1,5 @@
 import React, { useState, useMemo, ReactNode } from 'react';
-import { Search, ChevronDown, ChevronUp, Download, Inbox, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, Download, Inbox, ChevronLeft, ChevronRight, Printer } from 'lucide-react';
 
 export interface Column<T> {
   header: string;
@@ -20,6 +20,11 @@ interface DataTableProps<T> {
   emptyTitle?: string;
   emptySubtitle?: string;
   exportFileName?: string;
+  /** Adds a Print button that prints the currently filtered rows. */
+  printable?: boolean;
+  /** Tighter rows/headers for dense registers (opt-in; default look is unchanged). */
+  compact?: boolean;
+  printTitle?: string;
   keyExtractor?: (item: T) => string;
   keyField?: string;
 }
@@ -35,6 +40,9 @@ export function DataTable<T extends { id?: string | number }>({
   emptyTitle = 'No records found',
   emptySubtitle = 'Try adjusting your search terms or filter criteria.',
   exportFileName = 'export',
+  printable = false,
+  compact = false,
+  printTitle,
   keyExtractor,
 }: DataTableProps<T>) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -116,6 +124,26 @@ export function DataTable<T extends { id?: string | number }>({
     document.body.removeChild(link);
   };
 
+  const handlePrint = () => {
+    const esc = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const head = columns.map(c => `<th>${esc(c.header)}</th>`).join('');
+    const body = sortedData
+      .map(item => `<tr>${columns.map(c => `<td>${c.accessor ? esc((item as any)[c.accessor]) : ''}</td>`).join('')}</tr>`)
+      .join('');
+    const w = window.open('', '_blank', 'width=1100,height=800');
+    if (!w) return;
+    w.document.write(`<html><head><title>${esc(printTitle || exportFileName)}</title><style>
+      body{font-family:Arial,sans-serif;font-size:11px;padding:16px;color:#0f172a}
+      h2{font-size:15px;margin:0 0 4px}p{margin:0 0 12px;color:#64748b}
+      table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:4px 6px;text-align:left}
+      th{background:#f1f5f9;text-transform:uppercase;font-size:10px}</style></head><body>
+      <h2>${esc(printTitle || exportFileName)}</h2><p>Printed ${new Date().toLocaleString('en-GB')} • ${sortedData.length} records</p>
+      <table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
   return (
     <div className="bg-white rounded-xl border border-slate-200/90 shadow-xs overflow-hidden">
       {/* Table Toolbar */}
@@ -136,6 +164,17 @@ export function DataTable<T extends { id?: string | number }>({
 
         <div className="flex items-center space-x-2">
           {actions}
+          {printable && (
+            <button
+              type="button"
+              onClick={handlePrint}
+              title="Print"
+              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-xs"
+            >
+              <Printer className="w-3.5 h-3.5 text-slate-500" />
+              <span>Print</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleExportCSV}
@@ -157,7 +196,7 @@ export function DataTable<T extends { id?: string | number }>({
                 <th
                   key={idx}
                   onClick={() => handleSort(idx)}
-                  className={`py-3 px-4 ${col.sortable ? 'cursor-pointer hover:bg-slate-100/60' : ''} ${col.className || ''}`}
+                  className={`${compact ? 'py-2 px-2.5 whitespace-nowrap' : 'py-3 px-4'} ${col.sortable ? 'cursor-pointer hover:bg-slate-100/60' : ''} ${col.className || ''}`}
                 >
                   <div className="flex items-center space-x-1">
                     <span>{col.header}</span>
@@ -188,7 +227,7 @@ export function DataTable<T extends { id?: string | number }>({
                     {columns.map((col, colIdx) => {
                       const val = col.accessor ? (item as any)[col.accessor] : undefined;
                       return (
-                        <td key={colIdx} className={`py-3 px-4 text-slate-700 ${col.className || ''}`}>
+                        <td key={colIdx} className={`${compact ? 'py-2 px-2.5 text-xs align-middle' : 'py-3 px-4'} text-slate-700 ${col.className || ''}`}>
                           {col.render
                             ? col.render(val ?? item, item)
                             : col.accessor

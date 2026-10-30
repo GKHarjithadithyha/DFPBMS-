@@ -354,6 +354,7 @@ export interface ParentProperty {
   address: string;
   propertyType: 'commercial' | 'residential' | 'mixed';
   ownership: string;
+  description?: string;
   totalUnits: number;
   occupiedUnits: number;
   vacantUnits: number;
@@ -368,6 +369,7 @@ export interface ChildProperty {
   unitNumber: string;
   propertyType?: 'residential' | 'commercial';
   floor: string;
+  description?: string;
   squareFeet?: number;
   standardRent?: number;
   standardMaintenance?: number;
@@ -379,22 +381,41 @@ export interface ChildProperty {
   vacancyDays?: number;
 }
 
+export type OccupancyType = 'rental' | 'lease';
+export type AgreementDocumentStatus = 'uploaded' | 'pending_upload';
+
 export interface RentalAgreement {
   id: string;
+  /** Stable id for a continuous tenancy; renewals keep the occupancyId of the original agreement. */
+  occupancyId?: string;
+  previousAgreementId?: string;
   childPropertyId: string;
   tenantProfileId: string;
+  occupancyType?: OccupancyType; // legacy records are treated as 'rental'
   rentAmount: number;
   monthlyRent?: number; // alias
+  /** Lease only: total lease amount agreed. */
+  leaseAmount?: number;
+  /** Lease only: payment terms / agreed lease settlement terms. */
+  leaseTerms?: string;
   securityDeposit: number;
+  advanceAmount?: number;
   maintenanceAmount: number;
   monthlyMaintenance?: number; // alias
   collectionType: 'rent_only' | 'maintenance_only' | 'combined';
-  startDate: string;
-  endDate: string;
+  agreementDate?: string;
+  occupancyStartDate?: string;
+  occupants?: number;
+  startDate: string; // commencement date
+  endDate: string; // expiry date
+  /** First month (YYYY-MM) for which monthly dues are generated. */
+  billingStartMonth?: string;
   escalationPercentage?: number;
   dueDayOfMonth?: number;
-  status: 'active' | 'expired' | 'terminated';
+  status: 'active' | 'expired' | 'terminated' | 'renewed' | 'closed';
   agreementDocumentUrl?: string;
+  agreementDocumentName?: string;
+  documentStatus?: AgreementDocumentStatus;
   depositPaymentMode?: PaymentMode;
   depositBankAccountId?: string;
 }
@@ -402,6 +423,7 @@ export interface RentalAgreement {
 export interface RentCollection {
   id: string;
   agreementId: string;
+  occupancyId?: string;
   childPropertyId: string;
   tenantProfileId: string;
   collectionType: 'rent_only' | 'maintenance_only' | 'combined';
@@ -414,9 +436,132 @@ export interface RentCollection {
   date: string;
   collectionDate?: string; // alias
   forMonthYear?: string;
+  transactionRef?: string;
+  narration?: string;
+  /** How this payment was applied across monthly dues (oldest first). */
+  allocations?: { dueId: string; month: string; rent: number; maintenance: number }[];
   receiptNumber: string;
   collectedBy: string;
   timestamp: string;
+}
+
+export interface TenantAllocationInput {
+  childPropertyId: string;
+  tenantProfileId: string;
+  occupancyType: OccupancyType;
+  occupancyStartDate: string;
+  occupants: number;
+  rentAmount: number; // monthly rent (rental only)
+  leaseAmount?: number; // lease only
+  leaseTerms?: string;
+  maintenanceAmount: number;
+  securityDeposit: number;
+  advanceAmount: number;
+  dueDayOfMonth: number;
+  agreementDate?: string;
+  startDate: string;
+  endDate: string;
+  documentName?: string;
+  documentSize?: string;
+  recordDeposit: boolean; // post the deposit/advance receipt to the Cash/Bank Book now
+  paymentMode: PaymentMode;
+  bankAccountId?: string;
+}
+
+export interface AgreementRenewalInput {
+  agreementDate?: string;
+  startDate: string;
+  endDate: string;
+  rentAmount: number;
+  leaseAmount?: number;
+  leaseTerms?: string;
+  maintenanceAmount: number;
+  securityDeposit: number;
+  dueDayOfMonth: number;
+  documentName?: string;
+  documentSize?: string;
+}
+
+export interface RentalPaymentInput {
+  childPropertyId: string;
+  amount: number;
+  date: string;
+  mode: PaymentMode;
+  bankAccountId?: string;
+  transactionRef?: string;
+  narration?: string;
+}
+
+export interface OccupancyExitInput {
+  vacatingDate: string;
+  otherDues: number;
+  deductions: number;
+  deductionDescription: string;
+  handoverConfirmed: boolean;
+  paymentMode: PaymentMode;
+  bankAccountId?: string;
+  initialPayment: number;
+}
+
+export interface ActionResult {
+  ok: boolean;
+  message?: string;
+  id?: string;
+}
+
+/** One monthly charge for a tenancy. Rental = rent + maintenance, Lease = maintenance only. */
+export interface RentalDue {
+  id: string;
+  occupancyId: string;
+  agreementId: string;
+  childPropertyId: string;
+  tenantProfileId: string;
+  occupancyType: OccupancyType;
+  month: string; // YYYY-MM
+  dueDate: string;
+  rentDue: number;
+  maintenanceDue: number;
+  rentPaid: number;
+  maintenancePaid: number;
+  /** Set when the occupancy was closed and this due was carried into the settlement. */
+  closedInSettlement?: string;
+}
+
+export interface RentalSettlementPayment {
+  date: string;
+  amount: number;
+  direction: 'receipt' | 'payment';
+  mode: PaymentMode;
+  bankAccountId?: string;
+  reference?: string;
+}
+
+export interface RentalSettlement {
+  id: string;
+  agreementId: string;
+  occupancyId: string;
+  childPropertyId: string;
+  tenantProfileId: string;
+  occupancyType: OccupancyType;
+  vacatingDate: string;
+  pendingRent: number;
+  pendingMaintenance: number;
+  otherDues: number;
+  /** Refundable security deposit + advance (a liability, not rental income). */
+  refundableDeposit: number;
+  deductions: number;
+  deductionDescription: string;
+  refundableAmount: number;
+  payableByTenant: number;
+  paymentMode: PaymentMode;
+  bankAccountId?: string;
+  settledAmount: number;
+  status: 'pending' | 'partially_settled' | 'settled';
+  handoverConfirmed: boolean;
+  leaseTerms?: string;
+  payments: RentalSettlementPayment[];
+  createdAt: string;
+  createdBy: string;
 }
 
 export interface ExpenseCategory {
@@ -444,6 +589,12 @@ export interface ExpenseRecord {
   recurringFrequency?: 'monthly' | 'quarterly' | 'annually'; // alias
   classification: TransactionClassification;
   stream?: TransactionClassification; // alias
+  /** Rental property expenses: common-building costs link to the parent, unit costs to the child. */
+  parentPropertyId?: string;
+  childPropertyId?: string;
+  paidTo?: string;
+  transactionRef?: string;
+  supportingDocName?: string;
   enteredBy: string;
   postedAt: string;
 }

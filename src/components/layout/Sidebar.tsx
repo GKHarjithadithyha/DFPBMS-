@@ -138,11 +138,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: 'Rental Management',
           icon: Building,
           subItems: [
-            { id: 'rental_overview', label: 'Overview' },
-            { id: 'rental_parents', label: 'Parent Properties' },
-            { id: 'rental_units', label: 'Child Units & Properties' },
-            { id: 'rental_agreements', label: 'Agreements & Leases' },
-            { id: 'rental_collections', label: 'Rent Collections' },
+            { id: 'rental_overview', label: 'Overview Dashboard' },
+            { id: 'rental_properties', label: 'Property Management' },
+            { id: 'rental_tenants', label: 'Tenant & Agreement Management' },
+            { id: 'rental_collections', label: 'Collection Management' },
+            { id: 'rental_expenses', label: 'Expense Management' },
           ],
         },
         {

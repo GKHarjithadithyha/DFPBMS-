@@ -14,6 +14,14 @@ import {
   ChildProperty,
   RentalAgreement,
   RentCollection,
+  RentalDue,
+  RentalSettlement,
+  RentalSettlementPayment,
+  TenantAllocationInput,
+  AgreementRenewalInput,
+  RentalPaymentInput,
+  OccupancyExitInput,
+  ActionResult,
   ExpenseCategory,
   ExpenseRecord,
   InvestmentRecord,
@@ -53,6 +61,15 @@ import {
   INITIAL_NOTIFICATIONS,
   INITIAL_MASTER_DATA,
 } from '../mock/initialData';
+import {
+  RENTAL_EXPENSE_CATEGORIES,
+  buildMissingDues,
+  allocatePayment,
+  dueOutstanding,
+  monthOf,
+  occupancyKey,
+  dueDateFor,
+} from '../utils/rentalUtils';
 
 interface CTETransactionPayload {
   amount: number;
@@ -65,6 +82,8 @@ interface CTETransactionPayload {
   partyName: string;
   description: string;
   remarks?: string;
+  /** Transaction date (YYYY-MM-DD); defaults to today. */
+  date?: string;
 }
 
 interface ERPContextType {
@@ -143,6 +162,15 @@ interface ERPContextType {
   childProperties: ChildProperty[];
   rentalAgreements: RentalAgreement[];
   rentCollections: RentCollection[];
+  rentalDues: RentalDue[];
+  rentalSettlements: RentalSettlement[];
+  allocateTenant: (data: TenantAllocationInput) => ActionResult;
+  uploadAgreementDocument: (agreementId: string, fileName: string, fileSize: string) => void;
+  renewAgreement: (agreementId: string, data: AgreementRenewalInput) => ActionResult;
+  collectRentalPayment: (data: RentalPaymentInput) => ActionResult;
+  exitOccupancy: (agreementId: string, data: OccupancyExitInput) => ActionResult;
+  confirmHandover: (settlementId: string) => ActionResult;
+  recordSettlementPayment: (settlementId: string, payment: Omit<RentalSettlementPayment, 'direction'>) => ActionResult;
   createParentProperty: (data: Partial<ParentProperty>) => ParentProperty;
   createProperty: (data: Partial<ChildProperty>) => void;
   updateParentProperty: (id: string, data: Partial<ParentProperty>) => boolean;
@@ -161,7 +189,7 @@ interface ERPContextType {
   expenses: ExpenseRecord[];
   createExpenseCategory: (name: string) => ExpenseCategory;
   updateExpenseCategory: (id: string, name: string) => boolean;
-  recordExpense: (data: Omit<ExpenseRecord, 'id' | 'postedAt' | 'enteredBy'>) => void;
+  recordExpense: (data: Omit<ExpenseRecord, 'id' | 'postedAt' | 'enteredBy'>) => string;
 
   // Investment Module
   investments: InvestmentRecord[];
@@ -279,6 +307,16 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [rentalDues, setRentalDues] = useState<RentalDue[]>(() => {
+    const saved = localStorage.getItem('pbms_rental_dues');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [rentalSettlements, setRentalSettlements] = useState<RentalSettlement[]>(() => {
+    const saved = localStorage.getItem('pbms_rental_settlements');
+    return saved ? JSON.parse(saved) : [];
+  });
+
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>(() => {
     const saved = localStorage.getItem('pbms_expense_categories');
     return saved ? JSON.parse(saved) : INITIAL_EXPENSE_CATEGORIES;
@@ -334,6 +372,21 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => { localStorage.setItem('pbms_child_properties', JSON.stringify(childProperties)); }, [childProperties]);
   useEffect(() => { localStorage.setItem('pbms_rental_agreements', JSON.stringify(rentalAgreements)); }, [rentalAgreements]);
   useEffect(() => { localStorage.setItem('pbms_rent_collections', JSON.stringify(rentCollections)); }, [rentCollections]);
+  useEffect(() => { localStorage.setItem('pbms_rental_dues', JSON.stringify(rentalDues)); }, [rentalDues]);
+  useEffect(() => { localStorage.setItem('pbms_rental_settlements', JSON.stringify(rentalSettlements)); }, [rentalSettlements]);
+
+  // Rental: generate any missing monthly dues (idempotent, so renewals/reloads never duplicate them)
+  useEffect(() => {
+    const missing = buildMissingDues(rentalAgreements, rentalDues);
+    if (missing.length > 0) setRentalDues(prev => [...prev, ...missing]);
+  }, [rentalAgreements, rentalDues]);
+
+  // Rental: make sure the property-expense categories exist in the shared expense category master
+  useEffect(() => {
+    const missing = RENTAL_EXPENSE_CATEGORIES.filter(c => !expenseCategories.some(e => e.id === c.id));
+    if (missing.length > 0) setExpenseCategories(prev => [...prev, ...missing]);
+  }, [expenseCategories]);
+
   useEffect(() => { localStorage.setItem('pbms_expense_categories', JSON.stringify(expenseCategories)); }, [expenseCategories]);
   useEffect(() => { localStorage.setItem('pbms_expenses', JSON.stringify(expenses)); }, [expenses]);
   useEffect(() => { localStorage.setItem('pbms_investments', JSON.stringify(investments)); }, [investments]);
@@ -490,7 +543,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // =========================================================================
   const postCentralTransaction = (payload: CTETransactionPayload) => {
     const now = new Date().toISOString();
-    const today = now.slice(0, 10);
+    const today = payload.date || now.slice(0, 10);
     const multiplier = payload.direction === 'receipt' ? 1 : -1;
 
     // 1. Post to Cash Book if Cash
@@ -1289,8 +1342,11 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // =========================================================================
   // MODULE 3: RENTAL MANAGEMENT
   // =========================================================================
+  const nextSequence = (ids: string[]) =>
+    ids.reduce((max, id) => Math.max(max, parseInt(id.split('-').pop() || '0', 10) || 0), 0) + 1;
+
   const createParentProperty = (data: Partial<ParentProperty>): ParentProperty => {
-    const nextNum = parentProperties.length + 1;
+    const nextNum = nextSequence(parentProperties.map(p => p.id));
     const newId = `PROP-P-${String(nextNum).padStart(2, '0')}`;
     const newProp: ParentProperty = {
       id: newId,
@@ -1298,6 +1354,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       address: data.address || 'Commercial District, Bangalore',
       propertyType: data.propertyType || 'commercial',
       ownership: data.ownership || 'Dhavanam Group (100% Direct)',
+      description: data.description,
       totalUnits: 0,
       occupiedUnits: 0,
       vacantUnits: 0,
@@ -1321,7 +1378,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const createProperty = (data: Partial<ChildProperty>) => {
-    const nextNum = childProperties.length + 1;
+    const nextNum = nextSequence(childProperties.map(c => c.id));
     const newId = `PROP-C-${String(nextNum).padStart(2, '0')}`;
     const parentId = data.parentPropertyId || parentProperties[0]?.id || 'PROP-P-01';
     const parentName = parentProperties.find(p => p.id === parentId)?.name || 'Parent Property';
@@ -1332,10 +1389,11 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       unitNumber: data.unitNumber || `Unit ${nextNum}`,
       propertyType: data.propertyType || 'residential',
       floor: data.floor || '1st Floor',
+      description: data.description,
       amenities: data.amenities || ['Power Backup', 'Security'],
-      status: 'vacant',
-      rentAmount: data.rentAmount || 25000,
-      maintenanceAmount: data.maintenanceAmount || 2000,
+      status: data.status === 'maintenance' ? 'maintenance' : 'vacant',
+      rentAmount: data.rentAmount ?? 0,
+      maintenanceAmount: data.maintenanceAmount ?? 2000,
       vacancyDays: 0,
     };
     setChildProperties(prev => [...prev, newProp]);
@@ -1556,6 +1614,431 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     addAuditLog('CLOSE_LEASE', 'Rental', 'Agreement', agreementId, `Closed lease agreement ${agreementId}. Property marked vacant.`);
   };
 
+  // -------------------------------------------------------------------------
+  // Rental: tenant allocation, renewal, collections, exit & settlement
+  // NOTE: postCentralTransaction reads book balances from the current render, so each
+  // user action below posts at most one CTE entry.
+  // -------------------------------------------------------------------------
+  const syncParentRollup = (parentId: string | undefined, occupiedDelta: number) => {
+    if (!parentId) return;
+    setParentProperties(prev => prev.map(p => p.id === parentId
+      ? {
+          ...p,
+          occupiedUnits: Math.max(0, p.occupiedUnits + occupiedDelta),
+          vacantUnits: Math.max(0, p.vacantUnits - occupiedDelta),
+        }
+      : p));
+  };
+
+  const allocateTenant = (data: TenantAllocationInput): ActionResult => {
+    const child = childProperties.find(c => c.id === data.childPropertyId);
+    if (!child) return { ok: false, message: 'Select a child property.' };
+    if (child.status !== 'vacant') {
+      return { ok: false, message: `${child.unitNumber} is ${child.status}. Only vacant units can be allocated.` };
+    }
+    if (rentalAgreements.some(a => a.childPropertyId === child.id && a.status === 'active')) {
+      return { ok: false, message: `${child.unitNumber} already has an active allocation.` };
+    }
+    const tenant = getProfileById(data.tenantProfileId);
+    if (!tenant) return { ok: false, message: 'Select a tenant from the Master Profile.' };
+    if (!data.startDate || !data.endDate || data.endDate <= data.startDate) {
+      return { ok: false, message: 'Expiry date must be after the commencement date.' };
+    }
+    const isLease = data.occupancyType === 'lease';
+    if (!isLease && !(data.rentAmount > 0)) return { ok: false, message: 'Enter the monthly rent.' };
+    if (isLease && !((data.leaseAmount || 0) > 0)) return { ok: false, message: 'Enter the lease amount.' };
+    const held = (data.securityDeposit || 0) + (data.advanceAmount || 0);
+    if (data.recordDeposit && held > 0 && data.paymentMode === 'bank' && !data.bankAccountId) {
+      return { ok: false, message: 'Select the bank account that received the deposit.' };
+    }
+
+    const newId = `AGR-${new Date().getFullYear()}-${String(nextSequence(rentalAgreements.map(a => a.id))).padStart(2, '0')}`;
+    const occupancyStart = data.occupancyStartDate || data.startDate;
+    const agreement: RentalAgreement = {
+      id: newId,
+      occupancyId: newId,
+      childPropertyId: child.id,
+      tenantProfileId: tenant.id,
+      occupancyType: data.occupancyType,
+      rentAmount: isLease ? 0 : data.rentAmount,
+      leaseAmount: isLease ? data.leaseAmount : undefined,
+      leaseTerms: data.leaseTerms,
+      securityDeposit: data.securityDeposit || 0,
+      advanceAmount: data.advanceAmount || 0,
+      maintenanceAmount: data.maintenanceAmount || 0,
+      collectionType: isLease ? 'maintenance_only' : 'combined',
+      agreementDate: data.agreementDate || data.startDate,
+      occupancyStartDate: occupancyStart,
+      occupants: data.occupants,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      billingStartMonth: monthOf(occupancyStart),
+      dueDayOfMonth: data.dueDayOfMonth,
+      status: 'active',
+      agreementDocumentName: data.documentName,
+      documentStatus: data.documentName ? 'uploaded' : 'pending_upload',
+      depositPaymentMode: data.recordDeposit ? data.paymentMode : undefined,
+      depositBankAccountId: data.recordDeposit ? data.bankAccountId : undefined,
+    };
+
+    if (data.recordDeposit && held > 0) {
+      postCentralTransaction({
+        amount: held,
+        direction: 'receipt',
+        mode: data.paymentMode,
+        bankAccountId: data.bankAccountId,
+        classification: 'accounted',
+        sourceModule: 'Rental',
+        sourceRecordId: newId,
+        partyName: tenant.name,
+        description: `Refundable security deposit ₹${(data.securityDeposit || 0).toLocaleString('en-IN')} + advance ₹${(data.advanceAmount || 0).toLocaleString('en-IN')} for ${child.unitNumber} (liability - not rental income)`,
+      });
+    }
+
+    setRentalAgreements(prev => [...prev, agreement]);
+    setChildProperties(prev => prev.map(cp => cp.id === child.id
+      ? {
+          ...cp,
+          status: 'occupied',
+          currentTenantProfileId: tenant.id,
+          vacancyDays: 0,
+          rentAmount: agreement.rentAmount,
+          maintenanceAmount: agreement.maintenanceAmount,
+        }
+      : cp));
+    syncParentRollup(child.parentPropertyId, 1);
+
+    if (data.documentName) {
+      uploadDocument({
+        entityType: 'property',
+        entityId: newId,
+        docType: 'Rental Agreement',
+        title: `Agreement ${newId}`,
+        fileName: data.documentName,
+        fileSize: data.documentSize || '—',
+        module: 'Rental',
+        partyProfileId: tenant.id,
+      });
+    }
+
+    addAuditLog('ALLOCATE_TENANT', 'Rental', 'Agreement', newId, `Allocated ${child.unitNumber} to ${tenant.name} as ${data.occupancyType.toUpperCase()} (${newId})`);
+    return { ok: true, id: newId };
+  };
+
+  const uploadAgreementDocument = (agreementId: string, fileName: string, fileSize: string) => {
+    const agreement = rentalAgreements.find(a => a.id === agreementId);
+    if (!agreement) return;
+    setRentalAgreements(prev => prev.map(a => a.id === agreementId
+      ? { ...a, agreementDocumentName: fileName, documentStatus: 'uploaded' }
+      : a));
+    uploadDocument({
+      entityType: 'property',
+      entityId: agreementId,
+      docType: 'Rental Agreement',
+      title: `Agreement ${agreementId}`,
+      fileName,
+      fileSize,
+      module: 'Rental',
+      partyProfileId: agreement.tenantProfileId,
+    });
+  };
+
+  const renewAgreement = (agreementId: string, data: AgreementRenewalInput): ActionResult => {
+    const old = rentalAgreements.find(a => a.id === agreementId);
+    if (!old || old.status !== 'active') return { ok: false, message: 'Only an active agreement can be renewed.' };
+    if (!data.startDate || !data.endDate || data.endDate <= data.startDate) {
+      return { ok: false, message: 'New expiry date must be after the new commencement date.' };
+    }
+    const isLease = (old.occupancyType || 'rental') === 'lease';
+    if (!isLease && !(data.rentAmount > 0)) return { ok: false, message: 'Enter the monthly rent.' };
+    if (isLease && !((data.leaseAmount || 0) > 0)) return { ok: false, message: 'Enter the lease amount.' };
+
+    const occ = occupancyKey(old);
+    const newId = `AGR-${new Date().getFullYear()}-${String(nextSequence(rentalAgreements.map(a => a.id))).padStart(2, '0')}`;
+    const renewed: RentalAgreement = {
+      ...old,
+      id: newId,
+      occupancyId: occ,
+      previousAgreementId: old.id,
+      rentAmount: isLease ? 0 : data.rentAmount,
+      leaseAmount: isLease ? data.leaseAmount : undefined,
+      leaseTerms: data.leaseTerms ?? old.leaseTerms,
+      maintenanceAmount: data.maintenanceAmount || 0,
+      securityDeposit: data.securityDeposit || 0,
+      dueDayOfMonth: data.dueDayOfMonth,
+      agreementDate: data.agreementDate || data.startDate,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      status: 'active',
+      agreementDocumentName: data.documentName,
+      agreementDocumentUrl: undefined,
+      documentStatus: data.documentName ? 'uploaded' : 'pending_upload',
+    };
+
+    setRentalAgreements(prev => [...prev.map(a => a.id === old.id ? { ...a, status: 'renewed' as const } : a), renewed]);
+
+    // Re-point the schedule at the new terms. Dues are keyed by occupancy+month, so nothing is duplicated;
+    // only unpaid dues from the new commencement month onward are repriced, paid/partly-paid amounts are kept.
+    const fromMonth = monthOf(data.startDate);
+    setRentalDues(prev => prev.map(d => {
+      if (d.occupancyId !== occ || d.closedInSettlement || d.month < fromMonth) return d;
+      const untouched = d.rentPaid + d.maintenancePaid === 0;
+      return {
+        ...d,
+        agreementId: newId,
+        dueDate: dueDateFor(d.month, data.dueDayOfMonth),
+        rentDue: untouched ? renewed.rentAmount : d.rentDue,
+        maintenanceDue: untouched ? renewed.maintenanceAmount : d.maintenanceDue,
+      };
+    }));
+
+    setChildProperties(prev => prev.map(cp => cp.id === old.childPropertyId
+      ? { ...cp, rentAmount: renewed.rentAmount, maintenanceAmount: renewed.maintenanceAmount }
+      : cp));
+
+    if (data.documentName) {
+      uploadDocument({
+        entityType: 'property',
+        entityId: newId,
+        docType: 'Rental Agreement (Renewal)',
+        title: `Agreement ${newId} (renews ${old.id})`,
+        fileName: data.documentName,
+        fileSize: data.documentSize || '—',
+        module: 'Rental',
+        partyProfileId: old.tenantProfileId,
+      });
+    }
+
+    addAuditLog('RENEW_AGREEMENT', 'Rental', 'Agreement', newId, `Renewed ${old.id} as ${newId}: ${old.startDate}→${old.endDate} extended to ${data.startDate}→${data.endDate}`);
+    return { ok: true, id: newId };
+  };
+
+  const collectRentalPayment = (data: RentalPaymentInput): ActionResult => {
+    const agreement = rentalAgreements.find(a => a.childPropertyId === data.childPropertyId && a.status === 'active');
+    if (!agreement) return { ok: false, message: 'No active occupancy for this unit.' };
+    if (!(data.amount > 0)) return { ok: false, message: 'Enter a collection amount greater than zero.' };
+    if (data.mode === 'bank' && !data.bankAccountId) return { ok: false, message: 'Select a bank account for bank collections.' };
+
+    const occ = occupancyKey(agreement);
+    const occDues = rentalDues.filter(d => d.occupancyId === occ);
+    const outstanding = occDues.reduce((sum, d) => sum + dueOutstanding(d), 0);
+    if (outstanding <= 0) return { ok: false, message: 'There are no outstanding dues for this occupancy.' };
+    if (data.amount > outstanding) {
+      return { ok: false, message: `Amount exceeds the outstanding balance of ₹${outstanding.toLocaleString('en-IN')}.` };
+    }
+
+    const { next, allocations } = allocatePayment(occDues, data.amount);
+    const nextById = new Map(next.map(d => [d.id, d]));
+    const rent = allocations.reduce((s, a) => s + a.rent, 0);
+    const maintenance = allocations.reduce((s, a) => s + a.maintenance, 0);
+    const receiptNumber = `${masterData.receiptPrefix}${Date.now().toString().slice(-6)}`;
+    const tenantName = getProfileById(agreement.tenantProfileId)?.name || 'Tenant';
+    const months = allocations.map(a => a.month);
+
+    postCentralTransaction({
+      amount: data.amount,
+      direction: 'receipt',
+      mode: data.mode,
+      bankAccountId: data.bankAccountId,
+      classification: 'accounted',
+      sourceModule: 'Rental',
+      sourceRecordId: agreement.id,
+      partyName: tenantName,
+      description: `Rental collection ${receiptNumber} for ${months[0]}${months.length > 1 ? ` – ${months[months.length - 1]}` : ''} (Rent ₹${rent}, Maintenance ₹${maintenance})${data.transactionRef ? ` Ref ${data.transactionRef}` : ''}`,
+      remarks: data.narration,
+      date: data.date,
+    });
+
+    const collection: RentCollection = {
+      id: `RC-${Date.now().toString().slice(-6)}`,
+      agreementId: agreement.id,
+      occupancyId: occ,
+      childPropertyId: agreement.childPropertyId,
+      tenantProfileId: agreement.tenantProfileId,
+      collectionType: agreement.collectionType,
+      rentAmount: rent,
+      maintenanceAmount: maintenance,
+      totalAmount: data.amount,
+      paymentMode: data.mode,
+      bankAccountId: data.bankAccountId,
+      date: data.date,
+      forMonthYear: months.join(', '),
+      transactionRef: data.transactionRef,
+      narration: data.narration,
+      allocations,
+      receiptNumber,
+      collectedBy: userName,
+      timestamp: new Date().toISOString(),
+    };
+    setRentCollections(prev => [collection, ...prev]);
+    setRentalDues(prev => prev.map(d => nextById.get(d.id) || d));
+
+    addAuditLog('COLLECT_RENTAL_PAYMENT', 'Rental', 'Collection', collection.id, `Collected ₹${data.amount.toLocaleString('en-IN')} from ${tenantName} (${receiptNumber})`);
+    return { ok: true, id: receiptNumber };
+  };
+
+  const settlementTarget = (s: RentalSettlement) =>
+    s.refundableAmount > 0
+      ? { amount: s.refundableAmount, direction: 'payment' as const }
+      : { amount: s.payableByTenant, direction: 'receipt' as const };
+
+  const settlementStatusOf = (s: RentalSettlement, settled: number): RentalSettlement['status'] => {
+    const target = settlementTarget(s).amount;
+    if (target <= 0 || settled >= target) return 'settled';
+    return settled > 0 ? 'partially_settled' : 'pending';
+  };
+
+  const settlementFigures = (deposit: number, rent: number, maint: number, other: number, deductions: number) => {
+    const net = deposit - rent - maint - other - deductions;
+    return { refundableAmount: Math.max(0, net), payableByTenant: Math.max(0, -net) };
+  };
+
+  const postSettlementPayment = (
+    s: RentalSettlement,
+    p: Omit<RentalSettlementPayment, 'direction'>
+  ): RentalSettlement => {
+    const { direction } = settlementTarget(s);
+    postCentralTransaction({
+      amount: p.amount,
+      direction,
+      mode: p.mode,
+      bankAccountId: p.bankAccountId,
+      classification: 'accounted',
+      sourceModule: 'Rental',
+      sourceRecordId: s.id,
+      partyName: getProfileById(s.tenantProfileId)?.name || 'Tenant',
+      description: direction === 'payment'
+        ? `Refund of security deposit/advance on exit (settlement ${s.id})`
+        : `Exit dues paid by tenant (settlement ${s.id})`,
+      remarks: p.reference,
+      date: p.date,
+    });
+    const settledAmount = s.settledAmount + p.amount;
+    return {
+      ...s,
+      settledAmount,
+      payments: [...s.payments, { ...p, direction }],
+      status: settlementStatusOf(s, settledAmount),
+    };
+  };
+
+  const finalizeOccupancy = (agreement: RentalAgreement, settlementId: string) => {
+    const occ = occupancyKey(agreement);
+    const child = childProperties.find(c => c.id === agreement.childPropertyId);
+    setRentalAgreements(prev => prev.map(a => a.id === agreement.id ? { ...a, status: 'closed' as const } : a));
+    setChildProperties(prev => prev.map(cp => cp.id === agreement.childPropertyId
+      ? { ...cp, status: 'vacant', currentTenantProfileId: undefined, vacancyDays: 1 }
+      : cp));
+    syncParentRollup(child?.parentPropertyId, -1);
+    // Unpaid dues are carried into the settlement; history of every due is preserved.
+    setRentalDues(prev => prev.map(d =>
+      d.occupancyId === occ && dueOutstanding(d) > 0 ? { ...d, closedInSettlement: settlementId } : d));
+  };
+
+  const exitOccupancy = (agreementId: string, data: OccupancyExitInput): ActionResult => {
+    const agreement = rentalAgreements.find(a => a.id === agreementId);
+    if (!agreement || agreement.status !== 'active') return { ok: false, message: 'Only an active occupancy can be closed.' };
+    if (rentalSettlements.some(s => s.agreementId === agreementId && !s.handoverConfirmed)) {
+      return { ok: false, message: 'A settlement is already in progress for this occupancy. Confirm handover from the settlement record.' };
+    }
+    if (!data.vacatingDate) return { ok: false, message: 'Enter the vacating date.' };
+    if ((data.deductions || 0) > 0 && !data.deductionDescription.trim()) {
+      return { ok: false, message: 'A description is mandatory when deductions are applied.' };
+    }
+
+    const occ = occupancyKey(agreement);
+    const open = rentalDues.filter(d => d.occupancyId === occ && !d.closedInSettlement);
+    const pendingRent = open.reduce((s, d) => s + Math.max(0, d.rentDue - d.rentPaid), 0);
+    const pendingMaintenance = open.reduce((s, d) => s + Math.max(0, d.maintenanceDue - d.maintenancePaid), 0);
+    const refundableDeposit = (agreement.securityDeposit || 0) + (agreement.advanceAmount || 0);
+    const figures = settlementFigures(refundableDeposit, pendingRent, pendingMaintenance, data.otherDues || 0, data.deductions || 0);
+
+    const id = `SET-${new Date().getFullYear()}-${String(nextSequence(rentalSettlements.map(s => s.id))).padStart(2, '0')}`;
+    let settlement: RentalSettlement = {
+      id,
+      agreementId,
+      occupancyId: occ,
+      childPropertyId: agreement.childPropertyId,
+      tenantProfileId: agreement.tenantProfileId,
+      occupancyType: agreement.occupancyType || 'rental',
+      vacatingDate: data.vacatingDate,
+      pendingRent,
+      pendingMaintenance,
+      otherDues: data.otherDues || 0,
+      refundableDeposit,
+      deductions: data.deductions || 0,
+      deductionDescription: data.deductionDescription.trim(),
+      ...figures,
+      paymentMode: data.paymentMode,
+      bankAccountId: data.bankAccountId,
+      settledAmount: 0,
+      status: 'pending',
+      handoverConfirmed: data.handoverConfirmed,
+      leaseTerms: agreement.leaseTerms,
+      payments: [],
+      createdAt: new Date().toISOString(),
+      createdBy: userName,
+    };
+    settlement.status = settlementStatusOf(settlement, 0);
+
+    const target = settlementTarget(settlement).amount;
+    if ((data.initialPayment || 0) > 0) {
+      if (data.initialPayment > target) return { ok: false, message: `Settlement payment exceeds the amount due (₹${target.toLocaleString('en-IN')}).` };
+      if (data.paymentMode === 'bank' && !data.bankAccountId) return { ok: false, message: 'Select a bank account for the settlement payment.' };
+      settlement = postSettlementPayment(settlement, {
+        amount: data.initialPayment,
+        date: data.vacatingDate,
+        mode: data.paymentMode,
+        bankAccountId: data.bankAccountId,
+      });
+    }
+
+    setRentalSettlements(prev => [settlement, ...prev]);
+    if (data.handoverConfirmed) finalizeOccupancy(agreement, id);
+
+    addAuditLog('EXIT_OCCUPANCY', 'Rental', 'Settlement', id, `Exit settlement ${id} for ${agreementId}: ${figures.refundableAmount > 0 ? `refund ₹${figures.refundableAmount}` : `tenant payable ₹${figures.payableByTenant}`}${data.handoverConfirmed ? ' — occupancy closed, unit vacant' : ' — awaiting handover'}`);
+    return { ok: true, id };
+  };
+
+  const confirmHandover = (settlementId: string): ActionResult => {
+    const settlement = rentalSettlements.find(s => s.id === settlementId);
+    if (!settlement) return { ok: false, message: 'Settlement not found.' };
+    const agreement = rentalAgreements.find(a => a.id === settlement.agreementId);
+    if (!agreement || agreement.status !== 'active') return { ok: false, message: 'Occupancy is already closed.' };
+
+    // Dues may have rolled forward since the settlement was prepared: refresh the figures before closing.
+    const open = rentalDues.filter(d => d.occupancyId === settlement.occupancyId && !d.closedInSettlement);
+    const pendingRent = open.reduce((s, d) => s + Math.max(0, d.rentDue - d.rentPaid), 0);
+    const pendingMaintenance = open.reduce((s, d) => s + Math.max(0, d.maintenanceDue - d.maintenancePaid), 0);
+    const figures = settlementFigures(settlement.refundableDeposit, pendingRent, pendingMaintenance, settlement.otherDues, settlement.deductions);
+    const refreshed: RentalSettlement = { ...settlement, pendingRent, pendingMaintenance, ...figures, handoverConfirmed: true };
+    refreshed.status = settlementStatusOf(refreshed, refreshed.settledAmount);
+
+    setRentalSettlements(prev => prev.map(s => s.id === settlementId ? refreshed : s));
+    finalizeOccupancy(agreement, settlementId);
+    addAuditLog('CONFIRM_HANDOVER', 'Rental', 'Settlement', settlementId, `Handover confirmed; occupancy ${agreement.id} closed and unit marked vacant`);
+    return { ok: true, id: settlementId };
+  };
+
+  const recordSettlementPayment = (
+    settlementId: string,
+    payment: Omit<RentalSettlementPayment, 'direction'>
+  ): ActionResult => {
+    const settlement = rentalSettlements.find(s => s.id === settlementId);
+    if (!settlement) return { ok: false, message: 'Settlement not found.' };
+    const target = settlementTarget(settlement).amount;
+    const remaining = target - settlement.settledAmount;
+    if (remaining <= 0) return { ok: false, message: 'This settlement is already fully settled.' };
+    if (!(payment.amount > 0)) return { ok: false, message: 'Enter an amount greater than zero.' };
+    if (payment.amount > remaining) return { ok: false, message: `Amount exceeds the balance of ₹${remaining.toLocaleString('en-IN')}.` };
+    if (payment.mode === 'bank' && !payment.bankAccountId) return { ok: false, message: 'Select a bank account.' };
+
+    const updated = postSettlementPayment(settlement, payment);
+    setRentalSettlements(prev => prev.map(s => s.id === settlementId ? updated : s));
+    addAuditLog('SETTLEMENT_PAYMENT', 'Rental', 'Settlement', settlementId, `Recorded ₹${payment.amount.toLocaleString('en-IN')} against settlement ${settlementId}`);
+    return { ok: true, id: settlementId };
+  };
+
   // =========================================================================
   // MODULE 4: EXPENSE MANAGEMENT
   // =========================================================================
@@ -1571,7 +2054,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return newCategory;
   };
 
-  const recordExpense = (data: Omit<ExpenseRecord, 'id' | 'postedAt' | 'enteredBy'>) => {
+  const recordExpense = (data: Omit<ExpenseRecord, 'id' | 'postedAt' | 'enteredBy'>): string => {
     const newId = `EXP-2026-${String(expenses.length + 1).padStart(3, '0')}`;
     const now = new Date().toISOString();
 
@@ -1586,6 +2069,8 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       sourceRecordId: newId,
       partyName: data.categoryName || 'Expense',
       description: `Expense: ${data.categoryName || 'General'} - ${data.remarks || data.description || ''}`,
+      // Rental property expenses are posted on the date the expense was incurred.
+      date: data.parentPropertyId ? data.date : undefined,
     });
 
     const newExpense: ExpenseRecord = {
@@ -1597,6 +2082,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setExpenses(prev => [newExpense, ...prev]);
 
     addAuditLog('RECORD_EXPENSE', 'Expense', 'ExpenseRecord', newId, `Recorded expense of ₹${data.amount.toLocaleString('en-IN')} under ${data.categoryName || 'General'}`);
+    return newId;
   };
 
   // =========================================================================
@@ -1837,6 +2323,8 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setChildProperties(INITIAL_CHILD_PROPERTIES);
     setRentalAgreements(INITIAL_AGREEMENTS);
     setRentCollections([]);
+    setRentalDues([]);
+    setRentalSettlements([]);
     setExpenseCategories(INITIAL_EXPENSE_CATEGORIES);
     setExpenses(INITIAL_EXPENSES);
     setInvestments(INITIAL_INVESTMENTS);
@@ -1905,6 +2393,15 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         childProperties,
         rentalAgreements,
         rentCollections,
+        rentalDues,
+        rentalSettlements,
+        allocateTenant,
+        uploadAgreementDocument,
+        renewAgreement,
+        collectRentalPayment,
+        exitOccupancy,
+        confirmHandover,
+        recordSettlementPayment,
         createParentProperty,
         createProperty,
         updateParentProperty,

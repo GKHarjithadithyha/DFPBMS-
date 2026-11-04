@@ -440,6 +440,8 @@ export interface RentCollection {
   narration?: string;
   /** How this payment was applied across monthly dues (oldest first). */
   allocations?: { dueId: string; month: string; rent: number; maintenance: number }[];
+  /** Present when the payment was received through more than one mode. */
+  splits?: RentalPaymentSplit[];
   receiptNumber: string;
   collectedBy: string;
   timestamp: string;
@@ -466,6 +468,8 @@ export interface TenantAllocationInput {
   recordDeposit: boolean; // post the deposit/advance receipt to the Cash/Bank Book now
   paymentMode: PaymentMode;
   bankAccountId?: string;
+  /** Part of the deposit received in cash; the rest goes to `bankAccountId`. Omit to use `paymentMode` for all of it. */
+  depositCashAmount?: number;
 }
 
 export interface AgreementRenewalInput {
@@ -482,14 +486,27 @@ export interface AgreementRenewalInput {
   documentSize?: string;
 }
 
+/** One leg of a collection received through several modes (e.g. Cash + UPI). */
+export interface RentalPaymentSplit {
+  mode: PaymentMode;
+  /** Instrument label shown to the operator: Cash, Bank Transfer, UPI or Cheque. */
+  method: string;
+  amount: number;
+  bankAccountId?: string;
+  transactionRef?: string;
+}
+
 export interface RentalPaymentInput {
   childPropertyId: string;
+  /** Total received; equals the sum of `splits` when splits are given. */
   amount: number;
   date: string;
   mode: PaymentMode;
   bankAccountId?: string;
   transactionRef?: string;
   narration?: string;
+  /** When present, each leg is posted to its own book and `mode` / `bankAccountId` are ignored. */
+  splits?: RentalPaymentSplit[];
 }
 
 export interface OccupancyExitInput {
@@ -501,6 +518,9 @@ export interface OccupancyExitInput {
   paymentMode: PaymentMode;
   bankAccountId?: string;
   initialPayment: number;
+  /** Part of `initialPayment` paid in cash; the rest goes to `bankAccountId`. Omit to use `paymentMode` for all of it. */
+  initialCashAmount?: number;
+  initialReference?: string;
 }
 
 export interface ActionResult {
@@ -534,6 +554,19 @@ export interface RentalSettlementPayment {
   mode: PaymentMode;
   bankAccountId?: string;
   reference?: string;
+  /** Legs paid together (e.g. cash + bank) share one refund id and one receipt. */
+  refundId?: string;
+  remarks?: string;
+}
+
+/** Input for one refund transaction, paid in cash, by bank, or both. */
+export interface SettlementRefundInput {
+  date: string;
+  cashAmount: number;
+  bankAmount: number;
+  bankAccountId?: string;
+  reference?: string;
+  remarks?: string;
 }
 
 export interface RentalSettlement {
@@ -558,6 +591,9 @@ export interface RentalSettlement {
   settledAmount: number;
   status: 'pending' | 'partially_settled' | 'settled';
   handoverConfirmed: boolean;
+  /** Refund paused by the admin; no refund can be processed until released. */
+  onHold?: boolean;
+  holdReason?: string;
   leaseTerms?: string;
   payments: RentalSettlementPayment[];
   createdAt: string;

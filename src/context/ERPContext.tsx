@@ -17,6 +17,7 @@ import {
   RentalDue,
   RentalSettlement,
   RentalSettlementPayment,
+  SettlementRefundInput,
   TenantAllocationInput,
   AgreementRenewalInput,
   RentalPaymentInput,
@@ -70,6 +71,10 @@ import {
   occupancyKey,
   dueDateFor,
 } from '../utils/rentalUtils';
+
+/** Time-based suffix that stays unique when several postings happen in the same millisecond (e.g. cash + bank parts of one receipt). */
+let idSequence = 0;
+const uniqueSuffix = () => `${Date.now().toString().slice(-6)}${String(++idSequence % 1000).padStart(3, '0')}`;
 
 interface CTETransactionPayload {
   amount: number;
@@ -171,6 +176,10 @@ interface ERPContextType {
   exitOccupancy: (agreementId: string, data: OccupancyExitInput) => ActionResult;
   confirmHandover: (settlementId: string) => ActionResult;
   recordSettlementPayment: (settlementId: string, payment: Omit<RentalSettlementPayment, 'direction'>) => ActionResult;
+  /** Pays part or all of a deposit refund in cash, bank or both; each leg posts to its own book under one refund id. */
+  processSettlementRefund: (settlementId: string, input: SettlementRefundInput) => ActionResult;
+  reviseSettlement: (settlementId: string, input: { otherDues: number; deductions: number; deductionDescription: string }) => ActionResult;
+  setSettlementHold: (settlementId: string, onHold: boolean, reason?: string) => ActionResult;
   createParentProperty: (data: Partial<ParentProperty>) => ParentProperty;
   createProperty: (data: Partial<ChildProperty>) => void;
   updateParentProperty: (id: string, data: Partial<ParentProperty>) => boolean;
@@ -498,7 +507,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     afterValues?: string
   ) => {
     const newLog: AuditLogEntry = {
-      id: `AUD-${Date.now().toString().slice(-6)}`,
+      id: `AUD-${uniqueSuffix()}`,
       timestamp: new Date().toISOString(),
       actorName: userName,
       actorRole: userRole,
@@ -552,7 +561,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const newCashBal = prevCashBal + (payload.amount * multiplier);
 
       const cashEntry: CashBookEntry = {
-        id: `CB-${Date.now().toString().slice(-6)}`,
+        id: `CB-${uniqueSuffix()}`,
         date: today,
         amount: payload.amount,
         direction: payload.direction,
@@ -588,7 +597,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }));
 
       const bankEntry: BankBookEntry = {
-        id: `BB-${Date.now().toString().slice(-6)}`,
+        id: `BB-${uniqueSuffix()}`,
         date: today,
         bankAccountId: payload.bankAccountId,
         bankName: chosenBankName,
@@ -608,7 +617,7 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 3. Write Central Ledger Entry (Canonical source of truth)
     const ledgerEntry: CentralLedgerEntry = {
-      id: `CL-${Date.now().toString().slice(-6)}`,
+      id: `CL-${uniqueSuffix()}`,
       date: today,
       amount: payload.amount,
       direction: payload.direction,
@@ -1648,7 +1657,9 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!isLease && !(data.rentAmount > 0)) return { ok: false, message: 'Enter the monthly rent.' };
     if (isLease && !((data.leaseAmount || 0) > 0)) return { ok: false, message: 'Enter the lease amount.' };
     const held = (data.securityDeposit || 0) + (data.advanceAmount || 0);
-    if (data.recordDeposit && held > 0 && data.paymentMode === 'bank' && !data.bankAccountId) {
+    const cashPart = data.recordDeposit ? Math.min(held, Math.max(0, data.depositCashAmount ?? (data.paymentMode === 'cash' ? held : 0))) : 0;
+    const bankPart = data.recordDeposit ? held - cashPart : 0;
+    if (bankPart > 0 && !data.bankAccountId) {
       return { ok: false, message: 'Select the bank account that received the deposit.' };
     }
 
@@ -1677,21 +1688,26 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       status: 'active',
       agreementDocumentName: data.documentName,
       documentStatus: data.documentName ? 'uploaded' : 'pending_upload',
-      depositPaymentMode: data.recordDeposit ? data.paymentMode : undefined,
-      depositBankAccountId: data.recordDeposit ? data.bankAccountId : undefined,
+      depositPaymentMode: data.recordDeposit ? (bankPart > 0 ? 'bank' : 'cash') : undefined,
+      depositBankAccountId: data.recordDeposit && bankPart > 0 ? data.bankAccountId : undefined,
     };
 
     if (data.recordDeposit && held > 0) {
-      postCentralTransaction({
-        amount: held,
-        direction: 'receipt',
-        mode: data.paymentMode,
-        bankAccountId: data.bankAccountId,
-        classification: 'accounted',
-        sourceModule: 'Rental',
-        sourceRecordId: newId,
-        partyName: tenant.name,
-        description: `Refundable security deposit ₹${(data.securityDeposit || 0).toLocaleString('en-IN')} + advance ₹${(data.advanceAmount || 0).toLocaleString('en-IN')} for ${child.unitNumber} (liability - not rental income)`,
+      const description = `Refundable security deposit ₹${(data.securityDeposit || 0).toLocaleString('en-IN')} + advance ₹${(data.advanceAmount || 0).toLocaleString('en-IN')} for ${child.unitNumber} (liability - not rental income)`;
+      // A split receipt posts one entry to each book.
+      ([['cash', cashPart], ['bank', bankPart]] as const).forEach(([mode, amount]) => {
+        if (amount <= 0) return;
+        postCentralTransaction({
+          amount,
+          direction: 'receipt',
+          mode,
+          bankAccountId: mode === 'bank' ? data.bankAccountId : undefined,
+          classification: 'accounted',
+          sourceModule: 'Rental',
+          sourceRecordId: newId,
+          partyName: tenant.name,
+          description: cashPart > 0 && bankPart > 0 ? `${description} [${mode === 'cash' ? 'cash' : 'bank'} part ₹${amount.toLocaleString('en-IN')}]` : description,
+        });
       });
     }
 
@@ -1816,8 +1832,13 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const collectRentalPayment = (data: RentalPaymentInput): ActionResult => {
     const agreement = rentalAgreements.find(a => a.childPropertyId === data.childPropertyId && a.status === 'active');
     if (!agreement) return { ok: false, message: 'No active occupancy for this unit.' };
+    const splits = data.splits?.filter(s => s.amount > 0);
+    if (splits && splits.length > 0) {
+      if (splits.some(s => s.mode === 'bank' && !s.bankAccountId)) return { ok: false, message: 'Select a bank account for every bank amount.' };
+      data = { ...data, amount: splits.reduce((s, x) => s + x.amount, 0) };
+    }
     if (!(data.amount > 0)) return { ok: false, message: 'Enter a collection amount greater than zero.' };
-    if (data.mode === 'bank' && !data.bankAccountId) return { ok: false, message: 'Select a bank account for bank collections.' };
+    if (!splits?.length && data.mode === 'bank' && !data.bankAccountId) return { ok: false, message: 'Select a bank account for bank collections.' };
 
     const occ = occupancyKey(agreement);
     const occDues = rentalDues.filter(d => d.occupancyId === occ);
@@ -1835,19 +1856,25 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const tenantName = getProfileById(agreement.tenantProfileId)?.name || 'Tenant';
     const months = allocations.map(a => a.month);
 
-    postCentralTransaction({
-      amount: data.amount,
-      direction: 'receipt',
-      mode: data.mode,
-      bankAccountId: data.bankAccountId,
-      classification: 'accounted',
-      sourceModule: 'Rental',
-      sourceRecordId: agreement.id,
-      partyName: tenantName,
-      description: `Rental collection ${receiptNumber} for ${months[0]}${months.length > 1 ? ` – ${months[months.length - 1]}` : ''} (Rent ₹${rent}, Maintenance ₹${maintenance})${data.transactionRef ? ` Ref ${data.transactionRef}` : ''}`,
-      remarks: data.narration,
-      date: data.date,
-    });
+    // Each leg of a split collection lands in its own book (Cash Book or the chosen bank account).
+    const legs = splits && splits.length > 0
+      ? splits
+      : [{ mode: data.mode, method: data.mode, amount: data.amount, bankAccountId: data.bankAccountId, transactionRef: data.transactionRef }];
+    legs.forEach(leg =>
+      postCentralTransaction({
+        amount: leg.amount,
+        direction: 'receipt',
+        mode: leg.mode,
+        bankAccountId: leg.bankAccountId,
+        classification: 'accounted',
+        sourceModule: 'Rental',
+        sourceRecordId: agreement.id,
+        partyName: tenantName,
+        description: `Rental collection ${receiptNumber} for ${months[0]}${months.length > 1 ? ` – ${months[months.length - 1]}` : ''} (Rent ₹${rent}, Maintenance ₹${maintenance})${legs.length > 1 ? ` [${leg.method} ₹${leg.amount}]` : ''}${leg.transactionRef ? ` Ref ${leg.transactionRef}` : ''}`,
+        remarks: data.narration,
+        date: data.date,
+      })
+    );
 
     const collection: RentCollection = {
       id: `RC-${Date.now().toString().slice(-6)}`,
@@ -1859,11 +1886,12 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       rentAmount: rent,
       maintenanceAmount: maintenance,
       totalAmount: data.amount,
-      paymentMode: data.mode,
-      bankAccountId: data.bankAccountId,
+      paymentMode: legs.some(l => l.mode === 'bank') ? 'bank' : 'cash',
+      bankAccountId: legs.find(l => l.mode === 'bank')?.bankAccountId,
       date: data.date,
       forMonthYear: months.join(', '),
-      transactionRef: data.transactionRef,
+      transactionRef: legs.map(l => l.transactionRef).filter(Boolean).join(', ') || undefined,
+      splits: splits && splits.length > 1 ? splits : undefined,
       narration: data.narration,
       allocations,
       receiptNumber,
@@ -1984,13 +2012,20 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const target = settlementTarget(settlement).amount;
     if ((data.initialPayment || 0) > 0) {
       if (data.initialPayment > target) return { ok: false, message: `Settlement payment exceeds the amount due (₹${target.toLocaleString('en-IN')}).` };
-      if (data.paymentMode === 'bank' && !data.bankAccountId) return { ok: false, message: 'Select a bank account for the settlement payment.' };
-      settlement = postSettlementPayment(settlement, {
-        amount: data.initialPayment,
-        date: data.vacatingDate,
-        mode: data.paymentMode,
-        bankAccountId: data.bankAccountId,
-      });
+      // The first payment can be cash, bank or both; each part posts to its own book under one refund id.
+      const cashPart = Math.min(data.initialPayment, Math.max(0, data.initialCashAmount ?? (data.paymentMode === 'cash' ? data.initialPayment : 0)));
+      const bankPart = data.initialPayment - cashPart;
+      if (bankPart > 0 && !data.bankAccountId) return { ok: false, message: 'Select a bank account for the bank amount.' };
+      const refundId = `RFD-${id}-1`;
+      if (cashPart > 0) {
+        settlement = postSettlementPayment(settlement, { amount: cashPart, date: data.vacatingDate, mode: 'cash', refundId });
+      }
+      if (bankPart > 0) {
+        settlement = postSettlementPayment(settlement, {
+          amount: bankPart, date: data.vacatingDate, mode: 'bank', bankAccountId: data.bankAccountId,
+          reference: data.initialReference?.trim() || undefined, refundId,
+        });
+      }
     }
 
     setRentalSettlements(prev => [settlement, ...prev]);
@@ -2036,6 +2071,92 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const updated = postSettlementPayment(settlement, payment);
     setRentalSettlements(prev => prev.map(s => s.id === settlementId ? updated : s));
     addAuditLog('SETTLEMENT_PAYMENT', 'Rental', 'Settlement', settlementId, `Recorded ₹${payment.amount.toLocaleString('en-IN')} against settlement ${settlementId}`);
+    return { ok: true, id: settlementId };
+  };
+
+  const processSettlementRefund = (settlementId: string, input: SettlementRefundInput): ActionResult => {
+    const s = rentalSettlements.find(x => x.id === settlementId);
+    if (!s) return { ok: false, message: 'Settlement not found.' };
+    const target = settlementTarget(s);
+    if (target.direction !== 'payment') return { ok: false, message: 'No refund is due to the tenant on this settlement.' };
+    if (s.onHold) return { ok: false, message: 'This refund is on hold. Release the hold before processing it.' };
+    const cash = input.cashAmount || 0;
+    const bank = input.bankAmount || 0;
+    if (cash < 0 || bank < 0) return { ok: false, message: 'Amounts cannot be negative.' };
+    const total = cash + bank;
+    if (!(total > 0)) return { ok: false, message: 'Enter a cash or bank refund amount.' };
+    const remaining = target.amount - s.settledAmount;
+    if (remaining <= 0) return { ok: false, message: 'This refund has already been paid in full.' };
+    if (total > remaining) return { ok: false, message: `Cash + bank (₹${total.toLocaleString('en-IN')}) exceeds the remaining refund of ₹${remaining.toLocaleString('en-IN')}.` };
+    if (bank > 0 && !input.bankAccountId) return { ok: false, message: 'Select the bank account the refund is paid from.' };
+    if (bank > 0 && !input.reference?.trim()) return { ok: false, message: 'Enter the UTR / transaction reference for the bank refund.' };
+
+    const n = new Set(s.payments.map(p => p.refundId).filter(Boolean)).size + 1;
+    const refundId = `RFD-${s.id}-${n}`;
+    const tenantName = getProfileById(s.tenantProfileId)?.name || 'Tenant';
+    const child = childProperties.find(c => c.id === s.childPropertyId);
+    const where = `${child?.unitNumber || s.childPropertyId}${child?.parentPropertyId ? ` (${parentProperties.find(p => p.id === child.parentPropertyId)?.name || ''})` : ''}`;
+    const reference = input.reference?.trim() || undefined;
+
+    const legs = ([['cash', cash], ['bank', bank]] as const).filter(([, amount]) => amount > 0);
+    legs.forEach(([mode, amount]) =>
+      postCentralTransaction({
+        amount,
+        direction: 'payment',
+        mode,
+        bankAccountId: mode === 'bank' ? input.bankAccountId : undefined,
+        classification: 'accounted',
+        sourceModule: 'Rental',
+        sourceRecordId: refundId,
+        partyName: tenantName,
+        description: `Security deposit refund ${refundId} (${s.id}) — ${tenantName}, ${where}${mode === 'bank' && reference ? ` • Ref ${reference}` : ''}${legs.length > 1 ? ` [${mode} part]` : ''}`,
+        remarks: input.remarks,
+        date: input.date,
+      })
+    );
+
+    const settledAmount = s.settledAmount + total;
+    const updated: RentalSettlement = {
+      ...s,
+      settledAmount,
+      payments: [
+        ...s.payments,
+        ...legs.map(([mode, amount]) => ({
+          date: input.date, amount, direction: 'payment' as const, mode,
+          bankAccountId: mode === 'bank' ? input.bankAccountId : undefined,
+          reference: mode === 'bank' ? reference : undefined,
+          refundId, remarks: input.remarks,
+        })),
+      ],
+    };
+    updated.status = settlementStatusOf(updated, settledAmount);
+    setRentalSettlements(prev => prev.map(x => (x.id === settlementId ? updated : x)));
+    addAuditLog('SETTLEMENT_REFUND', 'Rental', 'Settlement', settlementId, `Refund ${refundId}: ₹${total.toLocaleString('en-IN')} (cash ₹${cash.toLocaleString('en-IN')}, bank ₹${bank.toLocaleString('en-IN')})`);
+    return { ok: true, id: refundId };
+  };
+
+  const reviseSettlement = (settlementId: string, input: { otherDues: number; deductions: number; deductionDescription: string }): ActionResult => {
+    const s = rentalSettlements.find(x => x.id === settlementId);
+    if (!s) return { ok: false, message: 'Settlement not found.' };
+    if (input.otherDues < 0 || input.deductions < 0) return { ok: false, message: 'Amounts cannot be negative.' };
+    if (input.deductions > 0 && !input.deductionDescription.trim()) return { ok: false, message: 'Enter remarks for the deduction.' };
+    const figures = settlementFigures(s.refundableDeposit, s.pendingRent, s.pendingMaintenance, input.otherDues, input.deductions);
+    if (figures.refundableAmount < s.settledAmount && s.payments.some(p => p.direction === 'payment')) {
+      return { ok: false, message: `₹${s.settledAmount.toLocaleString('en-IN')} has already been refunded; the refundable amount cannot fall below that.` };
+    }
+    const updated: RentalSettlement = { ...s, otherDues: input.otherDues, deductions: input.deductions, deductionDescription: input.deductionDescription.trim(), ...figures };
+    updated.status = settlementStatusOf(updated, updated.settledAmount);
+    setRentalSettlements(prev => prev.map(x => (x.id === settlementId ? updated : x)));
+    addAuditLog('REVISE_SETTLEMENT', 'Rental', 'Settlement', settlementId, `Deductions revised: other dues ₹${input.otherDues}, deductions ₹${input.deductions}`);
+    return { ok: true, id: settlementId };
+  };
+
+  const setSettlementHold = (settlementId: string, onHold: boolean, reason?: string): ActionResult => {
+    const s = rentalSettlements.find(x => x.id === settlementId);
+    if (!s) return { ok: false, message: 'Settlement not found.' };
+    if (onHold && !reason?.trim()) return { ok: false, message: 'Enter the reason for holding the refund.' };
+    setRentalSettlements(prev => prev.map(x => (x.id === settlementId ? { ...x, onHold, holdReason: onHold ? reason!.trim() : undefined } : x)));
+    addAuditLog(onHold ? 'HOLD_REFUND' : 'RELEASE_REFUND', 'Rental', 'Settlement', settlementId, onHold ? `Refund put on hold: ${reason}` : 'Refund hold released');
     return { ok: true, id: settlementId };
   };
 
@@ -2402,6 +2523,9 @@ export const ERPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         exitOccupancy,
         confirmHandover,
         recordSettlementPayment,
+        processSettlementRefund,
+        reviseSettlement,
+        setSettlementHold,
         createParentProperty,
         createProperty,
         updateParentProperty,

@@ -22,12 +22,9 @@ import { LoanNPAPage } from './pages/finance/LoanNPAPage';
 import { LoanClosurePage } from './pages/finance/LoanClosurePage';
 import { NewLoanScreen } from './pages/finance/NewLoanScreen';
 
-// Chit Fund Sub-pages
-import { ChitOverviewPage } from './pages/chit/ChitOverviewPage';
-import { ChitGroupsPage } from './pages/chit/ChitGroupsPage';
-import { ChitSchemesPage } from './pages/chit/ChitSchemesPage';
-import { ChitMembersPage } from './pages/chit/ChitMembersPage';
-import { ChitAuctionsPage } from './pages/chit/ChitAuctionsPage';
+// Chit Fund
+import { ChitModulePage } from './pages/chit/ChitModulePage';
+import { ChitProvider } from './pages/chit/chitStore';
 
 // Business Modules
 import { RentalManagementPage } from './pages/rental/RentalManagementPage';
@@ -132,19 +129,7 @@ const AppContent: React.FC = () => {
         return <FinanceOverviewPage onNavigate={handleNavigate} />;
 
       case 'chit':
-        if (activeSubTab === 'chit_groups' || activeSubTab === 'groups') {
-          return <ChitGroupsPage onNavigate={handleNavigate} />;
-        }
-        if (activeSubTab === 'chit_schemes' || activeSubTab === 'schemes') {
-          return <ChitSchemesPage onNavigate={handleNavigate} />;
-        }
-        if (activeSubTab === 'chit_members' || activeSubTab === 'members') {
-          return <ChitMembersPage onNavigate={handleNavigate} />;
-        }
-        if (activeSubTab === 'chit_auctions' || activeSubTab === 'auctions') {
-          return <ChitAuctionsPage onNavigate={handleNavigate} />;
-        }
-        return <ChitOverviewPage onNavigate={handleNavigate} />;
+        return <ChitModulePage initialSubTab={activeSubTab} onNavigate={handleNavigate} />;
 
       case 'rental':
         return <RentalManagementPage initialSubTab={activeSubTab} onNavigate={handleNavigate} />;
@@ -159,7 +144,7 @@ const AppContent: React.FC = () => {
         return <ReceivablesPayablesPage initialSubTab={activeSubTab} onNavigate={handleNavigate} />;
 
       case 'profiles':
-        return <ProfileDirectoryPage />;
+        return <ProfileDirectoryPage key={activeSubTab} initialProfileId={activeSubTab} />;
 
       case 'calendar':
         return <CalendarPage />;
@@ -182,13 +167,15 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <AppShell
-      currentTab={currentTab}
-      activeSubTab={activeSubTab}
-      onSelectTab={handleNavigate}
-    >
-      {renderActiveView()}
-    </AppShell>
+    <ChitProvider>
+      <AppShell
+        currentTab={currentTab}
+        activeSubTab={activeSubTab}
+        onSelectTab={handleNavigate}
+      >
+        {renderActiveView()}
+      </AppShell>
+    </ChitProvider>
   );
 };
 

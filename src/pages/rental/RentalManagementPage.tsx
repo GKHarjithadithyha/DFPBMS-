@@ -4,6 +4,7 @@ import { PropertyManagement } from './PropertyManagement';
 import { TenantAgreementManagement } from './TenantAgreementManagement';
 import { CollectionManagement } from './CollectionManagement';
 import { RentalExpenseManagement } from './RentalExpenseManagement';
+import { PropertyHistory } from './PropertyHistory';
 
 interface RentalManagementPageProps {
   initialSubTab?: string;
@@ -15,7 +16,8 @@ interface RentalManagementPageProps {
  * settlement, receipts, reports and the Cash/Bank Book postings live inside them as actions.
  * Old sub-tab ids from earlier navigation (bookmarked hashes) resolve to their new home.
  */
-const SUBMODULE_BY_ID: Record<string, 'overview' | 'properties' | 'tenants' | 'collections' | 'expenses'> = {
+const SUBMODULE_BY_ID: Record<string, 'overview' | 'properties' | 'tenants' | 'collections' | 'expenses' | 'history'> = {
+  rental_history: 'history',
   rental_overview: 'overview',
   overview: 'overview',
   rental_properties: 'properties',
@@ -44,6 +46,8 @@ export const RentalManagementPage: React.FC<RentalManagementPageProps> = ({ init
       return <CollectionManagement />;
     case 'expenses':
       return <RentalExpenseManagement />;
+    case 'history':
+      return <PropertyHistory onNavigate={onNavigate} />;
     default:
       return <RentalOverview onNavigate={onNavigate} />;
   }

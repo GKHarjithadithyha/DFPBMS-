@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext';
 import { formatCurrency } from '../../utils/formatters';
+import { useChit } from '../../pages/chit/chitStore';
 
 interface SidebarProps {
   currentTab: string;
@@ -57,10 +58,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectTab,
   isCollapsed,
 }) => {
-  const { userRole, userName, logout, totalCashBalance, totalBankBalance, loans, chitGroups } = useERP();
+  const { userRole, userName, logout, totalCashBalance, totalBankBalance, loans } = useERP();
+  const { data: chitData } = useChit();
 
   const pendingLoansCount = loans.filter(l => l.status === 'pending_approval').length;
-  const formingChitCount = chitGroups.filter(g => g.status === 'forming' || g.status === 'pending_approval').length;
+  const formingChitCount = chitData.groups.filter(g => g.status === 'forming').length;
 
   // Multiple modules can be expanded independently
   const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>({
@@ -124,13 +126,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           id: 'chit',
           label: 'Chit Fund Management',
           icon: Users2,
-          badge: formingChitCount > 0 ? `${formingChitCount} Pending` : undefined,
+          badge: formingChitCount > 0 ? `${formingChitCount} Forming` : undefined,
           subItems: [
             { id: 'chit_overview', label: 'Overview' },
-            { id: 'chit_groups', label: 'Active Groups' },
-            { id: 'chit_schemes', label: 'Schemes Master' },
-            { id: 'chit_members', label: 'Members Roll' },
-            { id: 'chit_auctions', label: 'Auction & Prize Records' },
+            { id: 'chit_schemes_groups', label: 'Schemes & Groups' },
+            { id: 'chit_allocation', label: 'Member Allocation' },
+            { id: 'chit_collection', label: 'Payment Collection' },
+            { id: 'chit_auction', label: 'Auction Details' },
+            { id: 'chit_prize', label: 'Prize Disbursement' },
+            { id: 'chit_member_ledger', label: 'Member Ledger' },
+            { id: 'chit_reports', label: 'Reports' },
           ],
         },
         {
@@ -143,6 +148,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             { id: 'rental_tenants', label: 'Tenant & Agreement Management' },
             { id: 'rental_collections', label: 'Collection Management' },
             { id: 'rental_expenses', label: 'Expense Management' },
+            { id: 'rental_history', label: 'Property History' },
           ],
         },
         {
@@ -293,7 +299,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {!isCollapsed && hasSubItems && isExpanded && (
                         <div className="ml-5 pl-2.5 border-l border-slate-200 space-y-0.5 my-0.5">
                           {item.subItems!.map((sub) => {
-                            const isSubActive = isActiveModule && activeSubTab === sub.id;
+                            // A group workspace (#chit/group:<id>) belongs under Schemes & Groups.
+                            const currentSub = item.id === 'chit' && activeSubTab?.startsWith('group:') ? 'chit_schemes_groups' : activeSubTab;
+                            const isSubActive = isActiveModule && currentSub === sub.id;
                             return (
                               <button
                                 key={sub.id}

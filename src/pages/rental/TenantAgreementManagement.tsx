@@ -8,6 +8,9 @@ import { Tabs } from '../../components/common/Tabs';
 import { DataTable, Column } from '../../components/common/DataTable';
 import { Modal } from '../../components/common/Modal';
 import { CashBankSelector } from '../../components/common/CashBankSelector';
+import { DepositChannel, DepositReceiptSelector, DueDatePicker, RentEscalationSection, addMonthsTo } from './AllocationFinancials';
+import { dueDateFor } from '../../utils/rentalUtils';
+import { RefundStatusPill, SettlementPanel, bankRefunded, cashRefunded } from './SettlementPanel';
 import { PaymentMode, RentalAgreement, RentalSettlement, OccupancyType } from '../../types';
 import {
   Field,
@@ -289,8 +292,18 @@ export const TenantAgreementManagement: React.FC<Props> = () => {
         );
       },
     },
-    { header: 'Settled', accessor: 'settledAmount', render: (_v, r) => <span className="font-mono">{formatCurrency(r.settledAmount)}</span> },
-    { header: 'Status', accessor: 'status', render: (_v, r) => settlementPill(r.status) },
+    { header: 'Cash / Bank Refunded', accessor: 'settledAmount', render: (_v, r) => (
+        <div className="font-mono text-[11px] leading-tight whitespace-nowrap">
+          <span className="block">Cash {formatCurrency(cashRefunded(r))}</span>
+          <span className="block text-slate-500">Bank {formatCurrency(bankRefunded(r))}</span>
+        </div>
+      ) },
+    { header: 'Remaining', accessor: 'refundableAmount', render: (_v, r) => {
+        const t = settlementTargetOf(r);
+        const left = Math.max(0, t.amount - r.settledAmount);
+        return <span className={`font-mono ${left > 0 ? 'text-rose-600 font-semibold' : 'text-emerald-700'}`}>{formatCurrency(left)}</span>;
+      } },
+    { header: 'Status', accessor: 'status', render: (_v, r) => <RefundStatusPill settlement={r} /> },
     { header: 'Handover', accessor: 'handoverConfirmed', render: (_v, r) => (r.handoverConfirmed ? <Pill tone="green">Confirmed</Pill> : <Pill tone="amber">Awaiting</Pill>) },
     {
       header: 'Actions',
@@ -489,6 +502,7 @@ export const TenantAgreementManagement: React.FC<Props> = () => {
             if (res.ok) {
               setExiting(null);
               setTab('settlements');
+              if (res.id) setSettlementId(res.id); // go straight to Process Refund / Final Settlement
               setNotice({
                 tone: 'ok',
                 text: input.handoverConfirmed
@@ -502,10 +516,9 @@ export const TenantAgreementManagement: React.FC<Props> = () => {
       )}
 
       {settlementId && (
-        <SettlementModal
-          settlement={rentalSettlements.find(s => s.id === settlementId)!}
+        <SettlementPanel
+          settlementId={settlementId}
           onClose={() => setSettlementId(null)}
-          onPay={(p) => recordSettlementPayment(settlementId, p)}
           onConfirmHandover={() => {
             const res = confirmHandover(settlementId);
             if (res.ok) setNotice({ tone: 'ok', text: `Handover confirmed for ${settlementId}. Occupancy closed and unit marked vacant.` });
@@ -548,8 +561,12 @@ const AllocationWizard: React.FC<{
   const [leaseTerms, setLeaseTerms] = useState('');
   const [maintenance, setMaintenance] = useState(presetChild?.maintenanceAmount ?? 0);
   const [deposit, setDeposit] = useState(0);
-  const [advance, setAdvance] = useState(0);
-  const [dueDay, setDueDay] = useState(5);
+  // The picked due date; its day-of-month is the recurring payment day.
+  const [dueDate, setDueDate] = useState(() => dueDateFor(todayStr().slice(0, 7), 5));
+  const dueDay = Number(dueDate.slice(8, 10));
+  const [duration, setDuration] = useState(12);
+  const [escOn, setEscOn] = useState(true);
+  const [escPct, setEscPct] = useState('5');
   const [agreementDate, setAgreementDate] = useState('');
   const [commencement, setCommencement] = useState('');
   const [expiry, setExpiry] = useState('');
@@ -557,12 +574,14 @@ const AllocationWizard: React.FC<{
   const [recordDeposit, setRecordDeposit] = useState(true);
   const [mode, setMode] = useState<PaymentMode>('cash');
   const [bankId, setBankId] = useState('');
+  const [channel, setChannel] = useState<DepositChannel>('cash');
+  const [cashPart, setCashPart] = useState('');
 
   const eligibleUnits = childProperties.filter(c => c.parentPropertyId === parentId && c.status === 'vacant');
   const child = childProperties.find(c => c.id === childId);
   const tenant = profiles.find(p => p.id === tenantId);
   const commenceEff = commencement || startDate;
-  const expiryEff = expiry || (commenceEff ? addYear(commenceEff) : '');
+  const expiryEff = expiry || (commenceEff ? addDays(addMonthsTo(commenceEff, Math.max(1, duration || 12)), -1) : '');
   const agreementEff = agreementDate || commenceEff;
 
   const tenantOptions = useMemo(() => {
@@ -583,7 +602,12 @@ const AllocationWizard: React.FC<{
       if (occupants < 1) return 'Number of occupants must be at least 1.';
       if (type === 'rental' && !(rent > 0)) return 'Enter the monthly rent.';
       if (type === 'lease' && !(leaseAmount > 0)) return 'Enter the lease amount.';
-      if (dueDay < 1 || dueDay > 28) return 'Payment due day must be between 1 and 28.';
+      if (!(duration >= 1)) return 'Enter the rental duration in months.';
+      if (!dueDate) return 'Select the monthly payment due date.';
+    }
+    if (s === 5 && recordDeposit && deposit > 0) {
+      if (channel !== 'cash' && !bankId) return 'Select the bank account that received the deposit.';
+      if (channel === 'both' && !(Number(cashPart) > 0 && Number(cashPart) < deposit)) return 'For a split receipt, enter a cash amount greater than 0 and less than the deposit.';
     }
     if (s === 4 && (!commenceEff || !expiryEff || expiryEff <= commenceEff)) return 'Expiry date must be after the commencement date.';
     return '';
@@ -596,7 +620,7 @@ const AllocationWizard: React.FC<{
   };
 
   const confirm = () => {
-    for (let s = 1; s <= 4; s++) {
+    for (let s = 1; s <= 5; s++) {
       const msg = validate(s);
       if (msg) {
         setError(msg);
@@ -615,7 +639,7 @@ const AllocationWizard: React.FC<{
       leaseTerms: type === 'lease' ? leaseTerms : undefined,
       maintenanceAmount: maintenance,
       securityDeposit: deposit,
-      advanceAmount: advance,
+      advanceAmount: 0, // the security deposit covers what used to be entered separately as an advance
       dueDayOfMonth: dueDay,
       agreementDate: agreementEff,
       startDate: commenceEff,
@@ -623,8 +647,9 @@ const AllocationWizard: React.FC<{
       documentName: doc?.name,
       documentSize: doc?.size,
       recordDeposit,
-      paymentMode: mode,
-      bankAccountId: mode === 'bank' ? bankId || undefined : undefined,
+      paymentMode: channel === 'cash' ? 'cash' : 'bank',
+      bankAccountId: channel === 'cash' ? undefined : bankId || undefined,
+      depositCashAmount: channel === 'both' ? Number(cashPart) : channel === 'cash' ? deposit : 0,
     });
     if (!res.ok) {
       setError(res.message || 'Allocation failed.');
@@ -759,6 +784,13 @@ const AllocationWizard: React.FC<{
           </div>
 
           <div className="grid grid-cols-3 gap-4">
+            <Field label="Rental Duration (months)" required hint="Sets the default agreement expiry.">
+              <input type="number" min={1} max={600} value={duration || ''} onChange={e => setDuration(Number(e.target.value))} className={`${inputCls} font-mono`} />
+            </Field>
+            <Field label="Occupancy Ends">
+              <input readOnly value={startDate ? formatDate(addDays(addMonthsTo(startDate, Math.max(1, duration || 12)), -1)) : '—'} className={`${inputCls} bg-slate-50 text-slate-700`} />
+            </Field>
+            <div className="hidden sm:block" />
             {type === 'rental' ? (
               <Field label="Monthly Rent (₹)" required>
                 <input type="number" min={0} value={rent} onChange={e => setRent(Number(e.target.value))} className={`${inputCls} font-mono`} />
@@ -774,15 +806,23 @@ const AllocationWizard: React.FC<{
             <Field label={type === 'lease' ? 'Security Deposit / Refundable Amount (₹)' : 'Security Deposit (₹)'}>
               <input type="number" min={0} value={deposit} onChange={e => setDeposit(Number(e.target.value))} className={`${inputCls} font-mono`} />
             </Field>
-            {type === 'rental' && (
-              <Field label="Advance Amount (₹)" hint="Held as refundable advance.">
-                <input type="number" min={0} value={advance} onChange={e => setAdvance(Number(e.target.value))} className={`${inputCls} font-mono`} />
-              </Field>
-            )}
-            <Field label="Payment Due Day of Month" required hint="Monthly dues fall due on this day.">
-              <input type="number" min={1} max={28} value={dueDay} onChange={e => setDueDay(Number(e.target.value))} className={`${inputCls} font-mono`} />
+            <Field label="Payment Due Date" required hint="Pick a date; its day becomes the monthly due day.">
+              <DueDatePicker value={dueDate} onChange={setDueDate} startDate={startDate} today={todayStr()} />
             </Field>
           </div>
+
+          {type === 'rental' && duration >= 12 && (
+            <RentEscalationSection
+              enabled={escOn}
+              onToggle={setEscOn}
+              percent={escPct}
+              onPercent={setEscPct}
+              baseRent={rent}
+              startDate={startDate}
+              durationMonths={duration}
+              today={todayStr()}
+            />
+          )}
 
           {type === 'lease' && (
             <Field label="Lease Payment Terms / Settlement Terms" hint="Applied when the occupancy is closed.">
@@ -836,20 +876,27 @@ const AllocationWizard: React.FC<{
             )}
             <p><span className="text-slate-500">Monthly maintenance:</span> <b>{formatCurrency(maintenance)}</b></p>
             <p><span className="text-slate-500">Security deposit:</span> {formatCurrency(deposit)}</p>
-            {type === 'rental' && <p><span className="text-slate-500">Advance:</span> {formatCurrency(advance)}</p>}
             <p><span className="text-slate-500">Agreement period:</span> {formatDate(commenceEff)} → {formatDate(expiryEff)}</p>
             <p><span className="text-slate-500">Document:</span> {doc ? doc.name : 'Pending Upload'}</p>
           </div>
 
-          {deposit + advance > 0 && (
+          {deposit > 0 && (
             <div className="border border-slate-200 rounded-lg p-4 space-y-3">
               <label className="flex items-center space-x-2 font-semibold text-slate-700">
                 <input type="checkbox" checked={recordDeposit} onChange={e => setRecordDeposit(e.target.checked)} />
-                <span>Record the {formatCurrency(deposit + advance)} deposit / advance receipt in the Cash / Bank Book now</span>
+                <span>Record the {formatCurrency(deposit)} security deposit receipt in the Cash / Bank Book now</span>
               </label>
               <p className="text-[11px] text-slate-500">Posted as a refundable deposit, kept separate from rental income.</p>
               {recordDeposit && (
-                <CashBankSelector mode={mode} onModeChange={setMode} bankAccountId={bankId} onBankAccountChange={setBankId} label="Received Into" />
+                <DepositReceiptSelector
+                  total={deposit}
+                  channel={channel}
+                  onChannel={setChannel}
+                  cashAmount={cashPart}
+                  onCashAmount={setCashPart}
+                  bankAccountId={bankId}
+                  onBankAccount={setBankId}
+                />
               )}
             </div>
           )}
@@ -999,28 +1046,45 @@ const ExitModal: React.FC<{
   const [deductions, setDeductions] = useState(0);
   const [deductionDescription, setDeductionDescription] = useState('');
   const [handover, setHandover] = useState(false);
-  const [payNow, setPayNow] = useState(0);
-  const [mode, setMode] = useState<PaymentMode>('cash');
-  const [bankId, setBankId] = useState('');
+  const { bankAccounts } = useERP();
+  const [channel, setChannel] = useState<'cash' | 'bank' | 'both'>('cash');
+  const [cashAmt, setCashAmt] = useState('');
+  const [bankAmt, setBankAmt] = useState('');
+  const [bankId, setBankId] = useState(bankAccounts[0]?.id || '');
+  const [utr, setUtr] = useState('');
   const [error, setError] = useState('');
 
   const net = deposit - pendingRent - pendingMaint - otherDues - deductions;
   const refundable = Math.max(0, net);
   const payable = Math.max(0, -net);
   const target = refundable > 0 ? refundable : payable;
-  const status = target <= 0 ? 'Settled' : payNow >= target ? 'Settled' : payNow > 0 ? 'Partially Settled' : 'Pending';
+  const cashN = channel === 'bank' ? 0 : Number(cashAmt) || 0;
+  const bankN = channel === 'cash' ? 0 : Number(bankAmt) || 0;
+  const payNow = cashN + bankN;
+  const pickChannel = (c: 'cash' | 'bank' | 'both') => {
+    const typed = Number(cashAmt) || Number(bankAmt) || 0;
+    if (c === 'cash') { setCashAmt(typed ? String(typed) : ''); setBankAmt(''); }
+    if (c === 'bank') { setBankAmt(typed ? String(typed) : ''); setCashAmt(''); }
+    setChannel(c);
+    setError('');
+  };
+  const status =target <= 0 ? 'Settled' : payNow >= target ? 'Settled' : payNow > 0 ? 'Partially Settled' : 'Pending';
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (payNow > target) return setError(`Cash + bank (${formatCurrency(payNow)}) exceeds the amount due of ${formatCurrency(target)}.`);
+    if (bankN > 0 && !bankId) return setError('Select the bank account for the bank amount.');
     const res = onSubmit({
       vacatingDate,
       otherDues,
       deductions,
       deductionDescription,
       handoverConfirmed: handover,
-      paymentMode: mode,
-      bankAccountId: mode === 'bank' ? bankId || undefined : undefined,
+      paymentMode: bankN > 0 ? 'bank' : 'cash',
+      bankAccountId: bankN > 0 ? bankId : undefined,
       initialPayment: payNow,
+      initialCashAmount: cashN,
+      initialReference: utr,
     });
     if (!res.ok) setError(res.message || 'Could not save the settlement.');
   };
@@ -1075,10 +1139,42 @@ const ExitModal: React.FC<{
             </div>
 
             <div className="space-y-3 border border-slate-200 rounded-lg p-3">
-              <Field label={refundable > 0 ? 'Refund paid now (₹)' : 'Received from tenant now (₹)'} hint="Leave 0 to settle later. Partial settlement is allowed.">
-                <input type="number" min={0} max={target} value={payNow} onChange={e => setPayNow(Number(e.target.value))} className={`${inputCls} font-mono`} />
-              </Field>
-              {payNow > 0 && <CashBankSelector mode={mode} onModeChange={setMode} bankAccountId={bankId} onBankAccountChange={setBankId} label="Settlement Payment Mode & Book" />}
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-700">
+                {refundable > 0 ? 'Refund paid now' : 'Received from tenant now'} — Cash / Bank / Both
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {([['cash', 'Cash'], ['bank', 'Bank'], ['both', 'Cash + Bank']] as const).map(([id, label]) => (
+                  <button key={id} type="button" onClick={() => pickChannel(id)}
+                    className={`rounded-lg border p-2 text-[11px] font-semibold ${channel === id ? 'border-emerald-500 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-500/20' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {channel !== 'bank' && (
+                  <Field label="Cash amount (₹)"><input type="number" min={0} value={cashAmt} onChange={e => { setCashAmt(e.target.value); setError(''); }} className={`${inputCls} font-mono`} placeholder="0" /></Field>
+                )}
+                {channel !== 'cash' && (
+                  <Field label="Bank amount (₹)"><input type="number" min={0} value={bankAmt} onChange={e => { setBankAmt(e.target.value); setError(''); }} className={`${inputCls} font-mono`} placeholder="0" /></Field>
+                )}
+              </div>
+              {bankN > 0 && (
+                <div className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                  <Field label="Bank account" required>
+                    <select value={bankId} onChange={e => setBankId(e.target.value)} className={inputCls}>
+                      <option value="">— Select bank account —</option>
+                      {bankAccounts.map(b => <option key={b.id} value={b.id}>{b.bankName} — A/c {b.accountNumber}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="UTR / transaction reference"><input value={utr} onChange={e => setUtr(e.target.value)} className={`${inputCls} font-mono`} /></Field>
+                </div>
+              )}
+              <div className="text-xs space-y-1 rounded-lg bg-slate-50 border border-slate-200 p-2.5">
+                <div className="flex justify-between"><span className="text-slate-500">Paid now</span><b className="font-mono">{formatCurrency(payNow)}</b></div>
+                <div className="flex justify-between"><span className="text-slate-500">Remaining</span><b className={`font-mono ${payNow > target ? 'text-rose-600' : ''}`}>{formatCurrency(Math.max(0, target - payNow))}</b></div>
+                {payNow > target && <p className="text-[11px] text-rose-600">Cash + bank exceeds the amount due.</p>}
+                <p className="text-[10px] text-slate-400">Leave both empty to settle later. More payments can be added from the settlement afterwards.</p>
+              </div>
               <div className="text-xs flex items-center justify-between">
                 <span className="text-slate-500">Settlement status</span>
                 <b>{status}</b>
@@ -1099,102 +1195,6 @@ const ExitModal: React.FC<{
           <button type="submit" className={primaryBtn}>{handover ? 'Save Settlement & Close Occupancy' : 'Save Settlement'}</button>
         </div>
       </form>
-    </Modal>
-  );
-};
-
-const SettlementModal: React.FC<{
-  settlement: RentalSettlement;
-  onClose: () => void;
-  onPay: (p: { date: string; amount: number; mode: PaymentMode; bankAccountId?: string; reference?: string }) => { ok: boolean; message?: string };
-  onConfirmHandover: () => { ok: boolean; message?: string };
-}> = ({ settlement, onClose, onPay, onConfirmHandover }) => {
-  const data = useRentalData();
-  const t = settlementTargetOf(settlement);
-  const remaining = Math.max(0, t.amount - settlement.settledAmount);
-
-  const [amount, setAmount] = useState(remaining);
-  const [date, setDate] = useState(todayStr());
-  const [mode, setMode] = useState<PaymentMode>('cash');
-  const [bankId, setBankId] = useState('');
-  const [reference, setReference] = useState('');
-  const [error, setError] = useState('');
-
-  useEffect(() => setAmount(remaining), [remaining]);
-
-  const pay = (e: React.FormEvent) => {
-    e.preventDefault();
-    const res = onPay({ date, amount, mode, bankAccountId: mode === 'bank' ? bankId || undefined : undefined, reference: reference || undefined });
-    setError(res.ok ? '' : res.message || 'Payment failed.');
-  };
-
-  const Line: React.FC<{ k: string; v: React.ReactNode }> = ({ k, v }) => (
-    <div className="flex justify-between py-1 text-xs border-b border-slate-100 last:border-0">
-      <span className="text-slate-500">{k}</span>
-      <span className="font-mono text-slate-800">{v}</span>
-    </div>
-  );
-
-  return (
-    <Modal
-      isOpen
-      onClose={onClose}
-      title={`Settlement ${settlement.id}`}
-      subtitle={`${data.childById.get(settlement.childPropertyId)?.unitNumber} • ${data.profileById.get(settlement.tenantProfileId)?.name} • vacating ${formatDate(settlement.vacatingDate)}`}
-      maxWidth="3xl"
-    >
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div>
-          <Line k="Refundable deposit / advance" v={formatCurrency(settlement.refundableDeposit)} />
-          {settlement.occupancyType === 'rental' && <Line k="Pending rent" v={formatCurrency(settlement.pendingRent)} />}
-          <Line k="Pending maintenance" v={formatCurrency(settlement.pendingMaintenance)} />
-          <Line k="Other dues" v={formatCurrency(settlement.otherDues)} />
-          <Line k="Deductions" v={formatCurrency(settlement.deductions)} />
-          {settlement.deductionDescription && <p className="text-[11px] text-slate-500 italic py-1">“{settlement.deductionDescription}”</p>}
-          <Line k="Refundable amount" v={formatCurrency(settlement.refundableAmount)} />
-          <Line k="Payable by tenant" v={formatCurrency(settlement.payableByTenant)} />
-          <Line k="Settled so far" v={formatCurrency(settlement.settledAmount)} />
-          <Line k="Status" v={settlementPill(settlement.status)} />
-          <Line k="Handover" v={settlement.handoverConfirmed ? <Pill tone="green">Confirmed</Pill> : <Pill tone="amber">Awaiting</Pill>} />
-          {settlement.leaseTerms && <p className="text-[11px] text-slate-500 mt-2">Lease terms: {settlement.leaseTerms}</p>}
-
-          <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mt-4 mb-1">Payments</h4>
-          {settlement.payments.length === 0 ? (
-            <p className="text-xs text-slate-400">No settlement payments recorded.</p>
-          ) : (
-            settlement.payments.map((p, i) => (
-              <Line key={i} k={`${formatDate(p.date)} • ${p.direction === 'payment' ? 'Refund' : 'Received'} • ${p.mode}`} v={formatCurrency(p.amount)} />
-            ))
-          )}
-        </div>
-
-        <div className="space-y-4">
-          {remaining > 0 ? (
-            <form onSubmit={pay} className="space-y-3 border border-slate-200 rounded-lg p-4">
-              <h4 className="text-xs font-bold text-slate-800">{t.direction === 'refund' ? 'Record refund to tenant' : 'Record payment from tenant'}</h4>
-              {error && <div className="rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs px-3 py-2">{error}</div>}
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Amount (₹)" required hint={`Balance ${formatCurrency(remaining)}`}>
-                  <input required type="number" min={1} max={remaining} value={amount} onChange={e => setAmount(Number(e.target.value))} className={`${inputCls} font-mono`} />
-                </Field>
-                <Field label="Date" required><input required type="date" value={date} onChange={e => setDate(e.target.value)} className={inputCls} /></Field>
-              </div>
-              <CashBankSelector mode={mode} onModeChange={setMode} bankAccountId={bankId} onBankAccountChange={setBankId} label="Payment Mode & Book" />
-              <Field label="Reference"><input value={reference} onChange={e => setReference(e.target.value)} className={inputCls} /></Field>
-              <button type="submit" className={primaryBtn}>Record Payment</button>
-            </form>
-          ) : (
-            <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-4">Nothing further to settle on this record.</div>
-          )}
-
-          {!settlement.handoverConfirmed && (
-            <div className="border border-amber-200 bg-amber-50 rounded-lg p-4 text-xs space-y-2">
-              <p className="text-amber-900">The unit is still occupied. Confirm the handover to close the occupancy and mark the unit vacant. Unpaid dues are carried into this settlement.</p>
-              <button type="button" onClick={() => { const r = onConfirmHandover(); if (r.ok) onClose(); }} className={primaryBtn}>Confirm Handover &amp; Close Occupancy</button>
-            </div>
-          )}
-        </div>
-      </div>
     </Modal>
   );
 };

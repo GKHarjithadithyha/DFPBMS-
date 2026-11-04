@@ -27,7 +27,7 @@ import { StatCard } from '../../components/common/StatCard';
 import { Modal } from '../../components/common/Modal';
 import { Profile, ProfileType } from '../../types';
 
-export const ProfileDirectoryPage: React.FC = () => {
+export const ProfileDirectoryPage: React.FC<{ initialProfileId?: string }> = ({ initialProfileId }) => {
   const {
     profiles,
     createProfile,
@@ -39,7 +39,9 @@ export const ProfileDirectoryPage: React.FC = () => {
   } = useERP();
 
   // Selected Profile for 360 Detail Drawer
-  const [selectedProfile, setSelectedProfile] = useState<Profile | null>(profiles[0] || null);
+  const [selectedProfile, setSelectedProfile] = useState<Profile | null>(
+    profiles.find(p => p.id === initialProfileId) || profiles[0] || null
+  );
 
   // New Profile Modal State
   const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
